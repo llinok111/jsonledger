@@ -1,0 +1,6 @@
+# Keep the working tree on LF so the upstream byte hashes stay meaningful on Windows.
+# Upstream ships LF blobs; a CRLF checkout only adds churn.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.zip binary

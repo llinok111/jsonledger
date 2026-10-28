@@ -1,10 +1,10 @@
 {
-  "name": "jsonrepair",
-  "version": "3.15.0",
-  "description": "Repair broken JSON documents",
+  "name": "jsonledger",
+  "version": "1.0.0",
+  "description": "Audit layer for jsonrepair: explain what a repair changed, refuse repairs that invent or drop data",
   "repository": {
     "type": "git",
-    "url": "https://github.com/josdejong/jsonrepair.git"
+    "url": "https://github.com/llinok111/jsonledger.git"
   },
   "type": "module",
   "main": "lib/cjs/index.js",
@@ -22,19 +22,32 @@
       "import": "./lib/esm/stream.js",
       "require": "./lib/cjs/stream.js",
       "types": "./lib/types/stream.d.ts"
+    },
+    "./ledger": {
+      "import": "./lib/esm/ledger/index.js",
+      "require": "./lib/cjs/ledger/index.js",
+      "types": "./lib/types/ledger/index.d.ts"
+    },
+    "./ledger/format": {
+      "import": "./lib/esm/ledger/format.js",
+      "require": "./lib/cjs/ledger/format.js",
+      "types": "./lib/types/ledger/format.d.ts"
     }
   },
   "keywords": [
-    "simple",
     "json",
+    "jsonrepair",
     "repair",
-    "fix",
-    "invalid",
-    "stream",
-    "streaming"
+    "audit",
+    "ledger",
+    "forensics",
+    "data-loss",
+    "lint",
+    "cli"
   ],
   "bin": {
-    "jsonrepair": "./bin/cli.js"
+    "jsonrepair": "./bin/cli.js",
+    "jsonledger": "./bin/jsonledger.js"
   },
   "scripts": {
     "test": "vitest watch src",
@@ -57,14 +70,21 @@
     "release:push": "git push && git push --tag",
     "release:publish": "npm publish",
     "release-dry-run": "npm run build-and-test && standard-version --dry-run",
-    "prepare": "husky"
+    "prepare": "husky",
+    "test:ledger": "vitest run src/ledger",
+    "bench": "node tools/bench/run.mjs",
+    "exactness:baseline": "node tools/checks/make-baseline.mjs",
+    "exactness:check": "node tools/checks/upstream-unchanged.mjs",
+    "test:all": "npm run lint && npm run test:it && npm run build && npm run exactness:check && npm run smoke:runtime",
+    "smoke:runtime": "node tools/checks/runtime-smoke.mjs"
   },
   "files": [
     "README.md",
     "LICENSE.md",
+    "NOTICE.md",
     "lib"
   ],
-  "author": "Jos de Jong",
+  "author": "Jos de Jong (jsonrepair), llinok111 (jsonledger layer)",
   "license": "ISC",
   "devDependencies": {
     "@babel/cli": "7.28.6",
@@ -87,5 +107,9 @@
     "typescript": "5.9.3",
     "uglify-js": "3.19.3",
     "vitest": "4.1.4"
+  },
+  "homepage": "https://github.com/llinok111/jsonledger#readme",
+  "engines": {
+    "node": ">=18"
   }
 }

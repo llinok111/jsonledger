@@ -1,0 +1,54 @@
+name: Ledger CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ledger:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [20.x, 22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install
+        run: npm ci --ignore-scripts
+      - name: Upstream files are unmodified
+        run: node tools/checks/upstream-unchanged.mjs
+      - name: Unit tests (upstream + ledger)
+        run: npx vitest run src
+        env:
+          CI: true
+      - name: Build and integration tests
+        run: npm run build
+        env:
+          CI: true
+      - name: CLI contract
+        run: npx vitest run test-lib/ledger-cli.test.js test-lib/ledger-lib.test.js
+        env:
+          CI: true
+      - name: Benchmark (smoke, 120 documents)
+        run: node tools/bench/run.mjs node_modules --limit 120
+
+  # The test runner itself needs Node 20+, so the declared runtime floor is
+  # verified separately, with plain node against the built artifacts.
+  runtime-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.x
+      - name: Install
+        run: npm ci --ignore-scripts
+      - name: Build library only (no test runner)
+        run: npm run build:esm && npm run build:cjs
+      - name: Runtime smoke
+        run: node tools/checks/runtime-smoke.mjs

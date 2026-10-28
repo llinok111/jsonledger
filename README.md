@@ -1,14 +1,235 @@
-# jsonrepair
+# jsonledger
 
-Repair invalid JSON documents.
+**jsonrepair tells you the repaired document. jsonledger tells you what the repair did to your data.**
 
-Try it out in a minimal demo: https://josdejong.github.io/jsonrepair/
+`jsonledger` is a derivative of [jsonrepair](https://github.com/josdejong/jsonrepair) (3.15.0, ISC).
+It does not repair anything itself: every repair is still performed by jsonrepair, byte for byte.
+What it adds is an audit layer — a defect list with positions, a per-mutation ledger, a loss level
+and a verdict — because a repair that silently invents, drops or retypes data is worse than a
+repair that fails loudly.
 
-Use it in a full-fledged application: https://jsoneditoronline.org
+```console
+$ cat broken.json
+[{"id":1},{"id":2},{"id":
 
-Read the background article ["How to fix JSON and validate it with ease"](https://jsoneditoronline.org/indepth/parse/fix-json/)
+$ npx jsonledger explain broken.json
+verdict: reject   loss: data
+source: 25 B  ->  32 B
+defects: 2   invented: 1   dropped: 0   retyped: 0   nesting: 0   comments removed: 0
 
-The following issues can be fixed:
+  DATA                  invented  $[2].id  null
+                        value exists only in the repaired document
+  WARN line 1:1         truncated $
+                        document ends inside 2 unclosed constructs; the tail is unknowable
+```
+
+jsonrepair repairs that input too — and hands you `[{"id":1},{"id":2},{"id":null}]` with no
+indication that the last record never existed.
+
+## Why this exists
+
+jsonrepair is the de-facto fixer for malformed JSON and it is good at it. But its public surface is
+one function that returns a string, or throws. Everything else is invisible:
+
+| What the repair does | What jsonrepair reports | What jsonledger reports |
+|---|---|---|
+| `{"a":NaN}` → `{"a":"NaN"}` | nothing (returns a string) | `coerced` at `$.a`, severity `data` |
+| `[{"id":1},{"id":` → `…{"id":null}]` | nothing | `fabricated` at `$[2].id`, severity `data` |
+| `{"a":1, ...}` → `{"a":1}` | nothing | `elided`, severity `warn` |
+| `[1,2,,3]` → `[[1,2],3]` | nothing | `restructured`, severity `data` |
+| `{"a":1` (truncated) | nothing | `truncated`, severity `warn` |
+| `{a:1}` → `{"a":1}` | nothing | `requoted`, severity `info` |
+
+## Measured, not asserted
+
+Reproduce (the repo's own `node_modules` is the corpus):
+
+```console
+npm run build
+node tools/bench/run.mjs node_modules --limit 600 --json docs/bench-600.json
+```
+
+600 valid JSON documents, seeded corruptions with known ground truth, 9 corruption classes.
+
+| | jsonrepair | jsonledger |
+|---|---|---|
+| valid JSON in, same bytes out | 600/600 | 600/600 (`verdict: ok`) |
+| lossless corruptions flagged as lossy (3596 samples) | 0 (no signal to give) | 0 false alarms |
+| destructive corruptions detected (2236 samples) | 0 (no signal to give) | 2236 (100%) |
+| destructive input that still produced a document | 1798/2236 | — |
+| …of those, a document that no longer means the same thing | 1204 | flagged `data` |
+| median time per document, warm, single process | 0.029 ms | 0.086 ms |
+
+The point is not that jsonledger repairs *better* — it does not repair at all. The point is that on
+1204 real documents upstream returned a plausible looking result whose meaning had changed, with
+nothing in the return value to say so.
+
+Per-class numbers: [docs/bench-600.json](docs/bench-600.json).
+
+## Install
+
+```console
+npm install jsonledger
+```
+
+Node.js 18 or newer. No runtime dependency beyond the upstream engine itself.
+
+## Usage
+
+### Audit a repair
+
+```js
+import { repair } from 'jsonledger/ledger'
+
+const result = repair('{"a":NaN,"b":1,}')
+
+result.verdict // 'reject'
+result.loss // 'data'
+result.output // '{"a":"NaN","b":1}'
+result.counts // { defects: 2, fabricated: 0, dropped: 0, coerced: 1, restructured: 0, requoted: 0, commentsRemoved: 0 }
+result.ledger // [{ kind: 'coerced', severity: 'data', path: '$.a', detail: 'bare NaN is not a JSON value and became a string', … }]
+result.defects // [{ code: 'non-standard-literal', line: 1, column: 6, severity: 'data', path: '$.a', … }]
+```
+
+### Refuse lossy repairs
+
+```js
+import { repair } from 'jsonledger/ledger'
+
+const result = repair(text, { policy: 'safe' })
+if (result.output === null) {
+  console.error(result.refused)
+  // refused: repair would invent data (0 dropped, 1 invented, 0 retyped)
+}
+```
+
+### Diagnose without repairing
+
+```js
+import { diagnose } from 'jsonledger/ledger'
+
+const { ok, validJson, defects } = diagnose('{a:1,}')
+// ok: false, validJson: false
+// defects: [{ code: 'unquoted-key', line: 1, column: 2, … }, { code: 'trailing-comma', … }]
+```
+
+### Audit a repair someone else produced
+
+```js
+import { verify } from 'jsonledger/ledger'
+
+verify('{"a":1,"b":2}', '{"a":1}')
+// { equal: false, loss: 'data', ledger: [{ kind: 'dropped', path: '$.b', … }] }
+```
+
+### CLI
+
+```console
+jsonledger check  <file...>          # diagnose only, never repairs
+jsonledger repair <file>             # repair, print the ledger, then the document
+jsonledger explain <file>            # repair, print the ledger only
+```
+
+Options: `--json`, `--output/-o <file>`, `--force`, `--min-severity <info|warn|data>`,
+`--no-report`. Use `-` to read from stdin.
+
+Exit codes are a contract, covered by tests:
+
+| code | meaning |
+|---|---|
+| 0 | document is clean |
+| 1 | defects found, repair is lossless (quotes, commas, comments, BOM, fences) |
+| 2 | needs review (document truncated, or a value changed type) |
+| 3 | repair would invent or drop data — the document is **not** emitted |
+| 4 | document could not be repaired at all |
+| 5 | usage or I/O error |
+
+## Loss levels
+
+| level | meaning | example |
+|---|---|---|
+| `none` | nothing changed | valid JSON in |
+| `cosmetic` | bytes changed, meaning identical | `{a:1}` → `{"a":1}` |
+| `type` | a value survived but changed JSON type | `0.0.1` → `"0.0.1"` |
+| `truncated` | the document ended mid-construct, or contained an ellipsis; what followed is unknowable | `{"a":1` |
+| `data` | a value was invented, dropped, destructively retyped, or re-nested | `NaN` → `"NaN"`, `[1,2,,3]` → `[[1,2],3]` |
+
+## How the ledger works
+
+1. A tolerant **scanner** walks the broken text once and produces (a) every key and scalar value with
+   its offset, JSON path and a defect tag, and (b) a defect list with line/column and severity. It
+   never repairs and never throws.
+2. jsonrepair produces the repaired text.
+3. An **aligner** matches the two token streams monotonically with a small lookahead. Tokens that
+   only exist in the output were invented; tokens that only exist in the input were dropped; matched
+   pairs whose JSON type changed were retyped; matched pairs whose path *shape* changed were
+   re-nested. Container counts close the remaining hole (an empty `{}` wrapped in `[]`).
+4. A **verdict** maps the findings to `ok` / `cosmetic` / `review` / `reject` / `unrepairable`.
+
+Details, including the defect code table and the reasons behind each design choice:
+[docs/jsonledger.md](docs/jsonledger.md).
+
+## What is upstream and what is new
+
+| path | owner |
+|---|---|
+| `src/regular/**`, `src/streaming/**`, `src/utils/**`, `src/index.ts`, `src/stream.ts` | upstream, untouched |
+| `bin/cli.js`, `test-lib/cli.test.js`, `test-lib/lib.test.js`, `tools/benchmark/**` | upstream, untouched |
+| `src/ledger/**`, `bin/jsonledger.js`, `test-lib/ledger-*.test.js`, `tools/bench/**`, `tools/checks/**`, `docs/**` | this derivative |
+| `README.md`, `package.json` (`name`, `bin`, `exports`, `scripts`), `package-lock.json` | modified by this derivative |
+
+`npm run exactness:check` hashes 46 upstream files against the fork commit and fails if any changed:
+
+```console
+$ npm run exactness:check
+exactness: 46/46 upstream files unchanged (fork 4a80ed8)
+```
+
+The upstream test suite still runs unmodified:
+
+```console
+$ npm run test:it
+Test Files  5 passed (5)
+     Tests  179 passed (179)
+```
+
+## Known limitations
+
+1. **The ledger cannot see intent.** It reports what changed; it cannot decide whether the input meant
+   `[1,2,3]` or `[[1,2],3]`.
+2. **Alignment is value level.** A container without any scalar inside it can only be attributed by
+   the container-count guard, so replacing one empty container with another of the same type in the
+   same slot is invisible.
+3. **Member reordering is not reported.** The token streams are compared in order; a repair that moved
+   members around would not raise an event. jsonrepair does not do this today.
+4. **Streaming is not audited.** `jsonledger/stream` is upstream's transform unchanged; the ledger
+   works on complete documents only.
+5. **Non-JSON dialects are guesses.** Bare tokens, `0.0.1`, `C:\temp`, URLs: reported as `requoted`
+   when the text survives and `coerced` when the type is guesswork. The ledger never claims to know
+   which reading the author intended.
+6. **Timing is measured, not promised.** 0.086 ms is a warm, single-process median over 600 documents
+   on one Windows machine; cold start and very large documents differ.
+7. **Pinned to the engine it audits.** Verified against jsonrepair 3.15.0. A future upstream change in
+   repair strategy can make findings noisier — the benchmark is how you would detect that.
+
+## Development
+
+```console
+npm ci
+npm run test:it        # upstream suite, 179 tests
+npm run test:ledger    # ledger suite
+npm run build          # esm + cjs + umd + types, then test-lib
+npm run exactness:check
+npm run bench          # node tools/bench/run.mjs node_modules
+npm run test:all       # lint + all suites + exactness
+```
+
+## Upstream documentation (jsonrepair 3.15.0)
+
+The engine below is jsonrepair, unchanged. `import { jsonrepair } from 'jsonledger'` behaves exactly
+like `jsonrepair` from the upstream package.
+
+### What it repairs
 
 - Add missing quotes around keys
 - Add missing escape characters
@@ -16,213 +237,78 @@ The following issues can be fixed:
 - Add missing closing brackets
 - Repair truncated JSON
 - Replace single quotes with double quotes
-- Replace special quote characters like `“...”`  with regular double quotes
+- Replace special quote characters like `“...”` with regular double quotes
 - Replace special white space characters with regular spaces
 - Replace Python constants `None`, `True`, and `False` with `null`, `true`, and `false`
 - Strip trailing commas
 - Strip comments like `/* ... */` and `// ...`
-- Strip fenced code blocks like `` ```json`` and `` ``` ``
+- Strip fenced code blocks like ` ```json` and ` ``` `
 - Strip ellipsis in arrays and objects like `[1, 2, 3, ...]`
 - Strip JSONP notation like `callback({ ... })`
 - Strip escape characters from an escaped string like `{\"stringified\": \"content\"}`
 - Strip MongoDB data types like `NumberLong(2)` and `ISODate("2012-12-19T06:01:17.171Z")`
 - Concatenate strings like `"long text" + "more text on next line"`
-- Turn newline delimited JSON into a valid JSON array, for example:
-    ```
-    { "id": 1, "name": "John" }
-    { "id": 2, "name": "Sarah" }
-    ```
-
-The `jsonrepair` library has streaming support and can handle infinitely large documents.
-
-## Install
-
-```
-$ npm install jsonrepair
-```
-
-Note that in the `lib` folder, there are builds for ESM, UMD, and CommonJs.
-
-
-## Use
+- Turn newline delimited JSON into a valid JSON array
+- Streaming support for very large documents
 
 ### ES module
 
-Use the `jsonrepair` function using an ES modules import:
-
 ```js
-import { jsonrepair } from 'jsonrepair'
+import { jsonrepair } from 'jsonledger'
 
-try {
-  // The following is invalid JSON: is consists of JSON contents copied from 
-  // a JavaScript code base, where the keys are missing double quotes, 
-  // and strings are using single quotes:
-  const json = "{name: 'John'}"
-  
-  const repaired = jsonrepair(json)
-  
-  console.log(repaired) // '{"name": "John"}'
-} catch (err) {
-  console.error(err)
-}
+const repaired = jsonrepair("{name: 'John'}")
+console.log(repaired) // '{"name": "John"}'
 ```
 
 ### Streaming API
-
-Use the streaming API in Node.js:
 
 ```js
 import { createReadStream, createWriteStream } from 'node:fs'
 import { pipeline } from 'node:stream'
-import { jsonrepairTransform } from 'jsonrepair/stream'
+import { jsonrepairTransform } from 'jsonledger/stream'
 
-const inputStream = createReadStream('./data/broken.json')
-const outputStream = createWriteStream('./data/repaired.json')
-
-pipeline(inputStream, jsonrepairTransform(), outputStream, (err) => {
-  if (err) {
-    console.error(err)
-  } else {
-    console.log('done')
-  }
-})
-
-// or using .pipe() instead of pipeline():
-// inputStream
-//   .pipe(jsonrepairTransform())
-//   .pipe(outputStream)
-//   .on('error', (err) => console.error(err))
-//   .on('finish', () => console.log('done'))
+pipeline(
+  createReadStream('./data/broken.json'),
+  jsonrepairTransform(),
+  createWriteStream('./data/repaired.json'),
+  (err) => console.error(err)
+)
 ```
 
 ### CommonJS
 
-Use in CommonJS (not recommended):
-
 ```js
-const { jsonrepair } = require('jsonrepair')
-const json = "{name: 'John'}"
-console.log(jsonrepair(json)) // '{"name": "John"}'
+const { jsonrepair } = require('jsonledger')
+console.log(jsonrepair("{name: 'John'}")) // '{"name": "John"}'
 ```
 
-### UMD
-
-Use with UMD in the browser (not recommended):
-
-```html 
-<script src="/node_modules/jsonrepair/lib/umd/jsonrepair.js"></script>
-<script>
-  const { jsonrepair } = JSONRepair
-  const json = "{name: 'John'}"
-  console.log(jsonrepair(json)) // '{"name": "John"}'
-</script>
-```
-
-### Python
-
-Use in Python via [`PythonMonkey`](https://github.com/Distributive-Network/PythonMonkey#pythonmonkey).
-
-1. Install `jsonrepair` via `npm install jsonrepair`
-2. Install `PythonMonkey` via `pip install pythonmonkey`
-3. Use the libraries in a Python script:
-    
-    ```python
-    import pythonmonkey
-
-    jsonrepair = pythonmonkey.require('jsonrepair').jsonrepair
-    
-    json = "[1,2,3,"
-    repaired = jsonrepair(json)
-    print(repaired) 
-    # [1,2,3]
-    ```
-
-## API
-
-### Regular API
-
-You can use `jsonrepair` as a function or as a streaming transform. Broken JSON is passed to the function, and the function either returns the repaired JSON, or throws an `JSONRepairError` exception when an issue is encountered which could not be solved.
+### API
 
 ```ts
-// @throws JSONRepairError 
-jsonrepair(json: string) : string
+// @throws JSONRepairError
+jsonrepair(json: string): string
+
+jsonrepairTransform(options?: { chunkSize?: number, bufferSize?: number }): Transform
 ```
 
-### Streaming API
+`chunkSize` and `bufferSize` default to `65536` bytes. `bufferSize` must be larger than the longest
+string in the document, otherwise the transform throws "Index out of range".
 
-The streaming API is availabe in `jsonrepair/stream` and can be used in a [Node.js stream](https://nodejs.org/api/stream.html). It consists of a transform function that can be used in a stream pipeline.
+### Upstream CLI
 
-```ts
-jsonrepairTransform(options?: { chunkSize?: number, bufferSize?: number }) : Transform
+The upstream `jsonrepair` binary is still installed alongside `jsonledger`:
+
+```console
+$ jsonrepair broken.json                        # repair to stdout
+$ jsonrepair broken.json --output repaired.json # repair to a file
+$ jsonrepair broken.json --overwrite            # replace the input file
 ```
-
-The option `chunkSize` determines the size of the chunks that the transform outputs, and is `65536` bytes by default. Changing `chunkSize` can influcence the performance. 
-
-The option `bufferSize` determines how many bytes of the input and output stream are kept in memory and is also `65536` bytes by default. This buffer is used as a "moving window" on the input and output. This is necessary because `jsonrepair` must look ahead or look back to see what to fix, and it must sometimes walk back the generated output to insert a missing comma for example. The `bufferSize` must be larger than the length of the largest string and whitespace in the JSON data, otherwise, and error is thrown when processing the data. Making `bufferSize` very large will result in more memory usage and less performance.
-
-## Command Line Interface (CLI)
-
-When `jsonrepair` is installed globally using npm, it can be used on the command line. To install `jsonrepair` globally:
-
-```bash
-$ npm install -g jsonrepair
-```
-
-Usage:
-
-```
-$ jsonrepair [filename] {OPTIONS}
-```
-
-Options:
-
-```
---version, -v       Show application version
---help,    -h       Show this message
---output,  -o       Output file
---overwrite         Overwrite the input file
---buffer            Buffer size in bytes, for example 64K (default) or 1M
-```
-
-Example usage:
-
-```
-$ jsonrepair broken.json                        # Repair a file, output to console
-$ jsonrepair broken.json > repaired.json        # Repair a file, output to file
-$ jsonrepair broken.json --output repaired.json # Repair a file, output to file
-$ jsonrepair broken.json --overwrite            # Repair a file, replace the file itself
-$ cat broken.json | jsonrepair                  # Repair data from an input stream
-$ cat broken.json | jsonrepair > repaired.json  # Repair data from an input stream, output to file
-```
-
-## Alternatives:
-
-Similar libraries:
-
-- https://github.com/RyanMarcus/dirty-json
-
-## Develop
-
-When implementing a fix or a new feature, it important to know that there are currently two implementations:
-
-- `src/regular` This is a non-streaming implementation. The code is small and works for files up to 512MB, ideal for usage in the browser.
-- `src/streaming` A streaming implementation that can be used in Node.js. The code is larger and more complex, and the implementation uses a configurable `bufferSize` and `chunkSize`. When the parsed document contains a string or number that is longer than the configured `bufferSize`, the library will throw an "Index out of range" error since it cannot hold the full string in the buffer. When configured with an infinite buffer size, the streaming implementation works the same as the regular implementation. In that case this out of range error cannot occur, but it makes the performance worse and the application can run out of memory when repairing large documents.
-
-Both implementations are tested against the same suite of unit tests in `src/index.test.ts`.
-
-Scripts:
-
-Script | Description
----------- | -----------
-`npm install` | Install the dependencies once
-`npm run build` | Build the library (ESM, CommonJs, and UMD output in the folder `lib`)
-`npm test` | Run the unit tests
-`npm run lint` | Run the linter (eslint)
-`npm run format` | Automatically fix linter issues
-`npm run build-and-test` | Run the linter, build all, and run unit tests and integration tests
-`npm run release` | Release a new version. This will lint, test, build, increment the version number, push the changes to git, add a git version tag, and publish the npm package.
-`npm run release-dry-run` | Run all release steps and see the change list without actually publishing:
 
 ## License
 
-Released under the [ISC license](LICENSE.md).
+ISC, same as upstream. See [LICENSE.md](LICENSE.md) (upstream, unchanged) and [NOTICE.md](NOTICE.md)
+for provenance and the list of derivative files.
+
+---
+
+中文速览：[docs/README.zh.md](docs/README.zh.md)
