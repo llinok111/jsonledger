@@ -37,18 +37,24 @@ jobs:
       - name: Benchmark (smoke, 120 documents)
         run: node tools/bench/run.mjs node_modules --limit 120
 
-  # The test runner itself needs Node 20+, so the declared runtime floor is
-  # verified separately, with plain node against the built artifacts.
+  # The build toolchain (vitest 4, cpy-cli, yargs-parser) requires Node 20+, while the
+  # published library declares node >= 18. Build with 22, then switch the runtime to 18
+  # and exercise the built artifacts. This is the only honest way to check that floor.
   runtime-floor:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 18.x
+          node-version: 22.x
       - name: Install
         run: npm ci --ignore-scripts
-      - name: Build library only (no test runner)
-        run: npm run build:esm && npm run build:cjs
-      - name: Runtime smoke
-        run: node tools/checks/runtime-smoke.mjs
+      - name: Build with the toolchain that supports it
+        run: npm run build
+        env:
+          CI: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.x
+      - name: Runtime smoke on node 18
+        run: node --version && node tools/checks/runtime-smoke.mjs

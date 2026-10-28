@@ -55,6 +55,14 @@ A derivative that audits another library should be falsifiable: it must be possi
 audited behaviour is really upstream's, not a re-implementation with its own bugs. Keeping the history
 and the byte hashes makes that check mechanical instead of a promise.
 
+## License detection caveat
+
+GitHub's licensee reports `NOASSERTION` for this repository because it also reports `NOASSERTION` for
+the upstream `josdejong/jsonrepair` — the ISC template in `LICENSE.md` does not match licensee's
+pattern for that file name. The license text itself is ISC, unmodified, and the derivative code is
+ISC as well. `LICENSE.md` is deliberately not edited: changing it would break the byte-hash guard and
+the provenance this project depends on.
+
 ## Trademarks
 
 `jsonrepair` is the name of the upstream project. This derivative uses a different package name and
